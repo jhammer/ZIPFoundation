@@ -353,9 +353,10 @@ extension ZIPFoundationTests {
     }
 
     func testSymlinkUnicodeNormalizationTraversalAttack() throws {
-        // "é" can be written as one code point or as "e" plus a combining accent. Swift's `==` treats both
-        // spellings as equal, but byte-exact file systems (e.g. ext4) treat them as different directories,
-        // so a link to the other spelling of the destination would point outside of it there.
+        // "é" can be written as one code point or as "e" plus a combining accent. Byte-exact file systems
+        // (e.g. ext4) treat the two spellings as different directories, so there a link to the other spelling of
+        // the destination points outside of it. Normalization-insensitive ones (e.g. APFS) treat them as the same
+        // directory, so there the link stays inside.
         let fileManager = FileManager()
         let destinationURL = self.createDirectory(for: #function + "Caf\u{E9}")
         // Foundation may normalize the name when creating the directory, so start from its actual spelling.
@@ -366,11 +367,63 @@ extension ZIPFoundationTests {
         XCTAssertEqual(otherName, name)
         XCTAssertFalse(otherName.utf8.elementsEqual(name.utf8))
         // Built as a string, since `URL` could normalize the name again.
-        let linkDestination = destinationURL.deletingLastPathComponent().path + "/" + otherName + "/file"
-        let archiveURL = try self.makeArchive(for: #function, entries: [("link", .symlink, linkDestination)])
+        let otherPath = destinationURL.deletingLastPathComponent().path + "/" + otherName
+        mkdir(otherPath, 0o755)
+        var destinationStat = stat(), otherStat = stat()
+        XCTAssertEqual(stat(destinationURL.path, &destinationStat), 0)
+        XCTAssertEqual(stat(otherPath, &otherStat), 0)
+        let isSameDirectory = destinationStat.st_dev == otherStat.st_dev && destinationStat.st_ino == otherStat.st_ino
+        let archiveURL = try self.makeArchive(for: #function, entries: [("link", .symlink, otherPath + "/file")])
+        if isSameDirectory {
+            try fileManager.unzipItem(at: archiveURL, to: destinationURL)
+        } else {
+            XCTAssertSwiftError(try fileManager.unzipItem(at: archiveURL, to: destinationURL),
+                                throws: Archive.ArchiveError.uncontainedSymlink)
+            XCTAssertFalse(fileManager.itemExists(at: destinationURL.appendingPathComponent("link")))
+        }
+    }
+
+    func testRealPathContainmentComparesBytes() {
+        // Swift's `==` treats both spellings of "é" as equal, but byte-exact file systems don't.
+        XCTAssert(URL.isRealPath("/a/caf\u{E9}", containedIn: "/a/caf\u{E9}"))
+        XCTAssert(URL.isRealPath("/a/caf\u{E9}/file", containedIn: "/a/caf\u{E9}"))
+        XCTAssert(URL.isRealPath("/a/file", containedIn: "/"))
+        XCTAssertFalse(URL.isRealPath("/a/cafe\u{301}", containedIn: "/a/caf\u{E9}"))
+        XCTAssertFalse(URL.isRealPath("/a/cafe\u{301}/file", containedIn: "/a/caf\u{E9}"))
+        XCTAssertFalse(URL.isRealPath("/a/caf\u{E9}2/file", containedIn: "/a/caf\u{E9}"))
+    }
+
+    func testSymlinkThroughPreexistingSymlinkTraversalAttack() throws {
+        // `v` doesn't exist yet when `x` is extracted. Once `v` leads to `sub`, `x` passes through `sub/pre`,
+        // which was already in the destination and leads outside.
+        let fileManager = FileManager()
+        let destinationURL = self.createDirectory(for: #function)
+        let outsideURL = self.createDirectory(for: #function + "Outside")
+        try fileManager.createDirectory(at: destinationURL.appendingPathComponent("sub"),
+                                        withIntermediateDirectories: true, attributes: nil)
+        try fileManager.createSymbolicLink(at: destinationURL.appendingPathComponent("sub/pre"),
+                                           withDestinationURL: outsideURL)
+        let archiveURL = try self.makeArchive(for: #function, entries: [
+            ("x", .symlink, "v/pre/secret"),
+            ("v", .symlink, "sub")
+        ])
         XCTAssertSwiftError(try fileManager.unzipItem(at: archiveURL, to: destinationURL),
                             throws: Archive.ArchiveError.uncontainedSymlink)
-        XCTAssertFalse(fileManager.itemExists(at: destinationURL.appendingPathComponent("link")))
+        XCTAssertFalse(fileManager.itemExists(at: destinationURL.appendingPathComponent("x")))
+        XCTAssert(fileManager.itemExists(at: destinationURL.appendingPathComponent("v")))
+    }
+
+    func testUncontainedSymlinkIsRemovedWhenExtractionFails() throws {
+        // Symlinks are checked after all entries are extracted, but also when extraction stops early.
+        let fileManager = FileManager()
+        let destinationURL = self.createDirectory(for: #function)
+        let archiveURL = try self.makeArchive(for: #function, entries: [
+            ("escape", .symlink, "../outside"),
+            ("../file.txt", .file, "content")
+        ])
+        XCTAssertCocoaError(try fileManager.unzipItem(at: archiveURL, to: destinationURL),
+                            throwsErrorWithCode: .fileReadInvalidFileName)
+        XCTAssertFalse(fileManager.itemExists(at: destinationURL.appendingPathComponent("escape")))
     }
 
     func testEntryThroughSymlinkOutsideDestinationIsRejected() throws {
@@ -418,9 +471,13 @@ extension ZIPFoundationTests {
             ("chained", .symlink, "dir/link"),
             ("absolute", .symlink, realDestinationURL.appendingPathComponent("dir/file.txt").path),
             ("dir/sub/", .directory, ""),
-            ("dir/sub/../sibling.txt", .file, "sibling")
+            ("dir/sub/../sibling.txt", .file, "sibling"),
+            // `b/c` doesn't exist yet when this link is extracted, only by the end.
+            ("a/up", .symlink, "b/c/../../b"),
+            ("a/b/c/", .directory, "")
         ])
         try fileManager.unzipItem(at: archiveURL, to: destinationURL)
+        XCTAssert(fileManager.fileExists(atPath: realDestinationURL.appendingPathComponent("a/up/c").path))
         for path in ["dir/nested/up", "dir/link", "chained", "absolute"] {
             let linkURL = realDestinationURL.appendingPathComponent(path)
             XCTAssertEqual(try String(contentsOf: linkURL, encoding: .utf8), "content")
@@ -440,7 +497,9 @@ extension ZIPFoundationTests {
         let siblingURL = directoryURL.deletingLastPathComponent()
             .appendingPathComponent(directoryURL.lastPathComponent + "Sibling/file")
 
-        XCTAssert(directoryURL.appendingPathComponent("missing/../file").isContained(in: directoryURL))
+        XCTAssert(directoryURL.appendingPathComponent("missing/file").isContained(in: directoryURL))
+        // Where `missing/..` leads depends on what `missing` turns out to be.
+        XCTAssertFalse(directoryURL.appendingPathComponent("missing/../file").isContained(in: directoryURL))
         XCTAssert(directoryLinkURL.appendingPathComponent("file").isContained(in: directoryURL))
         XCTAssert(directoryURL.appendingPathComponent("file").isContained(in: directoryLinkURL))
         XCTAssertFalse(directoryURL.appendingPathComponent("link/../file").isContained(in: directoryURL))

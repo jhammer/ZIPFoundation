@@ -258,19 +258,41 @@ extension ZIPFoundationTests {
         try Data("content".utf8).write(to: victimURL)
 
         let archiveURL = try self.makeArchive(for: #function, entries: [("link", .symlink, outsideURL.path)])
-        let archive = try Archive(url: archiveURL, accessMode: .update)
-        let payload = AppleDoublePayload(extendedAttributes: [(name: "com.example.tag", data: Data("meta".utf8))])
-        let companion = payload.encode()
-        try archive.addEntry(with: "__MACOSX/link/._victim", type: .file,
-                             uncompressedSize: Int64(companion.count), provider: { position, size in
-            return companion.subdata(in: Int(position)..<Int(position) + size)
-        })
+        try self.addCompanion("__MACOSX/link/._victim", withAttribute: "com.example.tag", value: Data("meta".utf8),
+                              toArchiveAt: archiveURL)
 
         try fileManager.unzipItem(at: archiveURL, to: destinationURL, symlinksValidWithin: .rootFS)
         XCTAssertNil(self.getXattr(name: "com.example.tag", at: victimURL))
     }
 
+    func testUnzipItemAppliesCompanionToSymlink() throws {
+        // A symlink's own metadata applies to the link, not to what it points to.
+        let fileManager = FileManager()
+        let destinationURL = self.createDirectory(for: #function)
+        let archiveURL = try self.makeArchive(for: #function, entries: [
+            ("target.txt", .file, "content"),
+            ("link", .symlink, "target.txt")
+        ])
+        try self.addCompanion("__MACOSX/._link", withAttribute: "com.example.tag", value: Data("meta".utf8),
+                              toArchiveAt: archiveURL)
+
+        try fileManager.unzipItem(at: archiveURL, to: destinationURL)
+        XCTAssertEqual(self.getXattr(name: "com.example.tag", at: destinationURL.appendingPathComponent("link")),
+                       Data("meta".utf8))
+        XCTAssertNil(self.getXattr(name: "com.example.tag", at: destinationURL.appendingPathComponent("target.txt")))
+    }
+
     // MARK: - Helpers
+
+    private func addCompanion(_ path: String, withAttribute name: String, value: Data,
+                              toArchiveAt archiveURL: URL) throws {
+        let archive = try Archive(url: archiveURL, accessMode: .update)
+        let companion = AppleDoublePayload(extendedAttributes: [(name: name, data: value)]).encode()
+        try archive.addEntry(with: path, type: .file, uncompressedSize: Int64(companion.count),
+                             provider: { position, size in
+            return companion.subdata(in: Int(position)..<Int(position) + size)
+        })
+    }
 
     private func setXattr(name: String, value: Data, at url: URL) throws {
         let fsRep = FileManager().fileSystemRepresentation(withPath: url.path)

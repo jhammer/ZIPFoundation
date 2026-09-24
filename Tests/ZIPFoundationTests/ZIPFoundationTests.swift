@@ -267,6 +267,10 @@ extension ZIPFoundationTests {
             ("testSymlinkThroughMissingDirectoryTraversalAttack", testSymlinkThroughMissingDirectoryTraversalAttack),
             ("testEntryThroughSymlinkTraversalAttack", testEntryThroughSymlinkTraversalAttack),
             ("testSymlinkUnicodeNormalizationTraversalAttack", testSymlinkUnicodeNormalizationTraversalAttack),
+            ("testRealPathContainmentComparesBytes", testRealPathContainmentComparesBytes),
+            ("testSymlinkThroughPreexistingSymlinkTraversalAttack",
+             testSymlinkThroughPreexistingSymlinkTraversalAttack),
+            ("testUncontainedSymlinkIsRemovedWhenExtractionFails", testUncontainedSymlinkIsRemovedWhenExtractionFails),
             ("testEntryThroughSymlinkOutsideDestinationIsRejected",
              testEntryThroughSymlinkOutsideDestinationIsRejected),
             ("testEntryThroughContainedSymlinkIsRejected", testEntryThroughContainedSymlinkIsRejected),
@@ -364,7 +368,8 @@ extension ZIPFoundationTests {
              testArchiveExtractWithoutPreservesAppleMetadataSkipsCompanion),
             ("testArchiveExtractCompanionEntryItselfIsNotReinterpreted",
              testArchiveExtractCompanionEntryItselfIsNotReinterpreted),
-            ("testUnzipItemDoesNotApplyCompanionThroughSymlink", testUnzipItemDoesNotApplyCompanionThroughSymlink)
+            ("testUnzipItemDoesNotApplyCompanionThroughSymlink", testUnzipItemDoesNotApplyCompanionThroughSymlink),
+            ("testUnzipItemAppliesCompanionToSymlink", testUnzipItemAppliesCompanionToSymlink)
         ]
         #else
         return []

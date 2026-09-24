@@ -32,153 +32,57 @@ extension URL {
 
     /// Returns whether `destinationPath`, the destination of a symlink at `linkURL`, resolves inside `directoryURL`.
     ///
-    /// `destinationPath` is resolved from the link's real parent directory, following any symlinks that
-    /// already exist on disk (including ones extracted earlier from the same archive).
-    /// The parent directory is expected to exist.
+    /// The destination is followed from the link's parent directory as far as it currently exists, so symlinks
+    /// already on disk (including ones extracted earlier from the same archive) are taken into account.
     static func isSymlinkDestination(
         _ destinationPath: String,
         ofLinkAt linkURL: URL,
         containedIn directoryURL: URL
     ) -> Bool {
-        guard let directory = try? ResolvedPath(resolving: directoryURL) else { return false }
-        // Everything is inside `/` (see `rootFS`), wherever the destination leads.
-        guard !directory.components.isEmpty else { return true }
-        guard let parent = try? ResolvedPath(resolving: linkURL.deletingLastPathComponent()) else { return false }
         // The kernel resolves destinations starting with `/` from the root and all others (including `~/...`)
         // from the directory containing the link.
-        let start = destinationPath.hasPrefix("/") ? ResolvedPath.root : parent
-        // `a -> b/../file` looks contained while `b` doesn't exist, but a later entry could create `b`
-        // as a symlink to `.`, which would move the destination to `../file`.
-        guard let resolved = try? start.appending(destinationPath, options: .rejectingParentOfMissingItems) else {
+        let startPath = destinationPath.hasPrefix("/") ? "/" : linkURL.deletingLastPathComponent().path
+        return URL.isPath(destinationPath, resolvedFrom: startPath, containedIn: directoryURL)
+    }
+
+    /// Returns whether `path`, followed from `startPath` through what currently exists, leads inside `directoryURL`.
+    ///
+    /// The file system resolves the part of `path` that exists, following symlinks and applying `..` to the
+    /// directory actually reached. The rest doesn't exist yet, so where it leads depends on what gets created
+    /// there. It's only accepted if it can't lead anywhere else: it must not start with a symlink (e.g. a dangling
+    /// one) or contain `..`, since `missing/..` changes meaning if `missing` is later created as a symlink.
+    static func isPath(_ path: String, resolvedFrom startPath: String, containedIn directoryURL: URL) -> Bool {
+        guard let directoryPath = URL.realPath(directoryURL.path) else { return false }
+        // Everything is inside `/` (see `rootFS`), wherever the path leads.
+        guard directoryPath != "/" else { return true }
+        // The file system would only see the part before a NUL.
+        guard !path.contains("\0") else { return false }
+        var existingPath = startPath
+        var remainingComponents = path.split(separator: "/").filter { $0 != "." }.map(String.init)
+        var fileStat = stat()
+        while let component = remainingComponents.first, stat(existingPath + "/" + component, &fileStat) == 0 {
+            existingPath += "/" + component
+            remainingComponents.removeFirst()
+        }
+        if let component = remainingComponents.first, lstat(existingPath + "/" + component, &fileStat) == 0 {
             return false
         }
-        return resolved.isContained(in: directory)
-    }
-}
-
-/// A path resolved against the file system the way the kernel resolves it when the path is opened or created.
-///
-/// Components are resolved one at a time: an existing symlink is replaced by its destination (a relative
-/// destination continues from the directory containing the link) and `..` steps up from the directory
-/// actually reached, not from the path as written. Components that don't exist yet are kept as written.
-/// Empty components are skipped like `fopen` does, so `dir//../file` means `dir/../file`
-/// (see https://github.com/weichsel/ZIPFoundation/issues/281).
-///
-/// `URL.standardized` and `URL.resolvingSymlinksInPath()` collapse `..` lexically instead, so containment
-/// checks based on them can be sidestepped by paths like `link/../file` once `link` is a symlink on disk.
-struct ResolvedPath {
-    struct Options: OptionSet {
-        let rawValue: Int
-
-        /// Fail instead of following an existing symlink. The directory resolution starts from is already
-        /// resolved, so this only applies to symlinks in the path being appended.
-        static let rejectingSymlinks = Options(rawValue: 1 << 0)
-        /// Fail when `..` steps out of a component that doesn't exist yet. Where such a path ends up
-        /// depends on what gets created there later.
-        static let rejectingParentOfMissingItems = Options(rawValue: 1 << 1)
+        guard !remainingComponents.contains(".."), let resolvedPath = URL.realPath(existingPath) else { return false }
+        return URL.isRealPath(resolvedPath, containedIn: directoryPath)
     }
 
-    enum ResolutionError: Error {
-        case invalidPath
-        case symlinkEncountered
-        case parentOfMissingItem
-        case tooManySymlinks
+    /// Returns the absolute path `path` refers to, with all symlinks, `.` and `..` resolved by `realpath(3)`.
+    static func realPath(_ path: String) -> String? {
+        guard let resolvedPath = realpath(path, nil) else { return nil }
+        defer { free(resolvedPath) }
+        return String(cString: resolvedPath)
     }
 
-    /// The root directory `/`.
-    static let root = ResolvedPath()
-    /// Matches `MAXSYMLINKS` on Darwin.
-    static let maxSymlinkCount = 32
-
-    /// The components of the resolved absolute path. Empty for `/`.
-    private(set) var components = [String]()
-    /// The number of trailing `components` that don't exist on disk.
-    private var missingComponentCount = 0
-
-    var path: String {
-        return "/" + self.components.joined(separator: "/")
-    }
-
-    private init() {}
-
-    /// Resolves the path of the file URL `url`. A relative path is resolved from the current directory.
-    init(resolving url: URL) throws {
-        var path = url.path
-        if !path.hasPrefix("/") {
-            // Relative paths are resolved against the current directory, the same one the kernel will use for writes.
-            let currentDirectoryPath = FileManager().currentDirectoryPath
-            guard currentDirectoryPath.hasPrefix("/") else { throw ResolutionError.invalidPath }
-            path = currentDirectoryPath + "/" + path
-        }
-        self = try ResolvedPath.root.appending(path)
-    }
-
-    func isContained(in directory: ResolvedPath) -> Bool {
+    /// Returns whether `path` is `directoryPath` or located beneath it. Both must be real paths (see `realPath`).
+    static func isRealPath(_ path: String, containedIn directoryPath: String) -> Bool {
         // Compare bytes: `==` treats canonically equivalent strings (e.g. "é" and "e\u{301}") as equal, but
-        // file systems like ext4 treat them as different names. Where they name the same item (e.g. APFS),
-        // this errs toward "not contained".
-        return self.components.starts(with: directory.components) { $0.utf8.elementsEqual($1.utf8) }
-    }
-
-    /// Returns whether `path`, resolved from the receiver, stays inside the receiver without passing
-    /// through any symlink.
-    func contains(relativePath path: String) -> Bool {
-        guard let resolved = try? self.appending(path, options: .rejectingSymlinks) else { return false }
-        return resolved.isContained(in: self)
-    }
-
-    /// Resolves `path` starting from the receiver.
-    ///
-    /// `path` is always relative to the receiver; leading `/` are skipped like any empty component.
-    /// Start from `ResolvedPath.root` to resolve an absolute path.
-    func appending(_ path: String, options: Options = []) throws -> ResolvedPath {
-        var result = self
-        var pending = Array(path.split(separator: "/", omittingEmptySubsequences: false).reversed())
-        var symlinkCount = 0
-        while let component = pending.popLast() {
-            switch component {
-            case "", ".":
-                continue
-            case "..":
-                try result.removeLastComponent(options: options)
-            default:
-                guard let destination = try result.appendComponent(component) else { continue }
-                if options.contains(.rejectingSymlinks) { throw ResolutionError.symlinkEncountered }
-                symlinkCount += 1
-                guard symlinkCount <= ResolvedPath.maxSymlinkCount else { throw ResolutionError.tooManySymlinks }
-                // Continue with the link's destination, starting from the directory containing the link.
-                result.components.removeLast()
-                if destination.hasPrefix("/") { result.components.removeAll() }
-                pending += destination.split(separator: "/", omittingEmptySubsequences: false).reversed()
-            }
-        }
-        return result
-    }
-
-    private mutating func removeLastComponent(options: Options) throws {
-        if self.missingComponentCount > 0 {
-            guard !options.contains(.rejectingParentOfMissingItems) else { throw ResolutionError.parentOfMissingItem }
-            self.missingComponentCount -= 1
-        }
-        _ = self.components.popLast()
-    }
-
-    /// Appends `component` and returns the destination of the resulting path if it's an existing symlink.
-    private mutating func appendComponent(_ component: Substring) throws -> String? {
-        // The file system would only see the part before a NUL.
-        guard !component.contains("\0") else { throw ResolutionError.invalidPath }
-        self.components.append(String(component))
-        guard self.missingComponentCount == 0 else {
-            self.missingComponentCount += 1
-            return nil
-        }
-        var fileStat = stat()
-        guard lstat(self.path, &fileStat) == 0 else {
-            // Anything that can't be looked up can't be written through either, so it's treated as missing.
-            self.missingComponentCount = 1
-            return nil
-        }
-        guard fileStat.st_mode & S_IFMT == S_IFLNK else { return nil }
-        return try FileManager().destinationOfSymbolicLink(atPath: self.path)
+        // file systems like ext4 treat them as different names.
+        let directoryPrefix = directoryPath.hasSuffix("/") ? directoryPath : directoryPath + "/"
+        return path.utf8.elementsEqual(directoryPath.utf8) || path.utf8.starts(with: directoryPrefix.utf8)
     }
 }

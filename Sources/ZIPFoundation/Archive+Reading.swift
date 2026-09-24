@@ -111,7 +111,7 @@ extension Archive {
             let rawConsumer: Consumer = { (data: Data) in
                 guard let linkPath = String(data: data, encoding: .utf8) else { throw ArchiveError.invalidEntryPath }
 
-                // The destination is resolved from the link's real parent directory, so that has to exist first.
+                // The destination is followed from the link's parent directory, so that has to exist first.
                 try fileManager.createParentDirectoryStructure(for: url)
                 let validWithinURL = symlinksValidWithin ?? url.deletingLastPathComponent()
                 guard URL.isSymlinkDestination(linkPath, ofLinkAt: url, containedIn: validWithinURL) else {

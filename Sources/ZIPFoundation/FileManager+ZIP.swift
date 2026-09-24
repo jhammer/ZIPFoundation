@@ -171,11 +171,14 @@ extension FileManager {
         // entries. We buffer the parsed payloads and apply them after the main extraction pass.
         var pendingAppleDouble: [String: AppleDoublePayload] = [:]
 
-        // Entry paths are resolved from the real destination directory against what's on disk when the
-        // entry is written, so symlinks (including ones extracted earlier from this archive) can't redirect
-        // them. Well-formed archives never place an entry beneath a symlink, so any entry whose path passes
-        // through a symlink is rejected.
-        let resolvedDestination = try? ResolvedPath(resolving: destinationURL)
+        // Symlink destinations are checked once all entries are extracted, since a destination may not exist yet
+        // and later entries can change where it leads. Entries are never written through symlinks, so a link can't
+        // redirect anything in the meantime. Links that lead outside are removed, also when extraction fails.
+        var symlinkURLs = [URL]()
+        var hasCheckedSymlinks = false
+        defer {
+            if !hasCheckedSymlinks { _ = self.removeSymlinks(at: symlinkURLs, leadingOutside: symlinksValidWithin) }
+        }
 
         for entry in archive {
             let path = pathEncoding == nil ? entry.path : entry.path(using: pathEncoding!)
@@ -205,30 +208,30 @@ extension FileManager {
                     continue
                 }
             }
-            let entryURL = destinationURL.appendingPathComponent(path)
-            guard resolvedDestination?.contains(relativePath: path) == true else {
+            guard let entryURL = self.extractionURL(forEntryPath: path, in: destinationURL) else {
                 throw CocoaError(.fileReadInvalidFileName,
-                                 userInfo: [NSFilePathErrorKey: entryURL.path])
+                                 userInfo: [NSFilePathErrorKey: destinationURL.appendingPathComponent(path).path])
             }
             let crc32: CRC32
             // unzipItem batches companion handling (see below), so we opt each per-entry extract
-            // out of the per-call archive lookup.
+            // out of the per-call archive lookup. Symlink destinations are checked after the loop.
             if let progress = progress {
                 let entryProgress = archive.makeProgressForReading(entry)
                 progress.addChild(entryProgress, withPendingUnitCount: entryProgress.totalUnitCount)
                 crc32 = try archive.extract(entry, to: entryURL,
                                             skipCRC32: skipCRC32,
-                                            symlinksValidWithin: symlinksValidWithin,
+                                            symlinksValidWithin: .rootFS,
                                             budget: budget,
                                             progress: entryProgress,
                                             preservesAppleMetadata: false)
             } else {
                 crc32 = try archive.extract(entry, to: entryURL,
                                             skipCRC32: skipCRC32,
-                                            symlinksValidWithin: symlinksValidWithin,
+                                            symlinksValidWithin: .rootFS,
                                             budget: budget,
                                             preservesAppleMetadata: false)
             }
+            if entry.type == .symlink { symlinkURLs.append(entryURL) }
 
             func verifyChecksumIfNecessary() throws {
                 if skipCRC32 == false, crc32 != entry.checksum {
@@ -238,12 +241,18 @@ extension FileManager {
             try verifyChecksumIfNecessary()
         }
 
+        hasCheckedSymlinks = true
+        guard self.removeSymlinks(at: symlinkURLs, leadingOutside: symlinksValidWithin) else {
+            throw Archive.ArchiveError.uncontainedSymlink
+        }
+
 #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS) || os(watchOS)
         if preservesAppleMetadata {
             for (path, payload) in pendingAppleDouble {
-                let targetURL = destinationURL.appendingPathComponent(path)
-                // Companion paths get the same containment check as regular entries.
-                guard resolvedDestination?.contains(relativePath: path) == true,
+                // Companion paths get the same check as regular entries, except that they may describe a symlink
+                // itself: the metadata is applied without following it.
+                guard let targetURL = self.extractionURL(forEntryPath: path, in: destinationURL,
+                                                         allowingSymlinkAtEnd: true),
                       self.itemExists(at: targetURL) else { continue }
                 FileManager.applyAppleDoublePayload(payload, to: targetURL)
             }
@@ -255,6 +264,53 @@ extension FileManager {
 
 
     // MARK: - Helpers
+
+    /// Returns the URL an archive entry at `path` is written to, or `nil` if the entry would land outside
+    /// `destinationURL` or be written through a symlink. Well-formed archives never place entries beneath a
+    /// symlink, so this rejects any symlink in the entry's path, including ones extracted from the same archive.
+    ///
+    /// `.` and `..` are applied to `path` by name, and the entry is written to the result, so a symlink that only
+    /// appears in the original path (e.g. `link` in `link/../file`) is never traversed.
+    func extractionURL(forEntryPath path: String, in destinationURL: URL, allowingSymlinkAtEnd: Bool = false) -> URL? {
+        var components = [Substring]()
+        for component in path.split(separator: "/") where component != "." {
+            if component == ".." {
+                guard components.popLast() != nil else { return nil }
+            } else {
+                // The file system would only see the part before a NUL.
+                guard !component.contains("\0") else { return nil }
+                components.append(component)
+            }
+        }
+        var url = destinationURL
+        var checksExistingItems = true
+        for (index, component) in components.enumerated() {
+            url.appendPathComponent(String(component))
+            guard checksExistingItems else { continue }
+            var fileStat = stat()
+            guard lstat(url.path, &fileStat) == 0 else {
+                // Nothing below a missing item can exist either.
+                checksExistingItems = false
+                continue
+            }
+            let isLastComponent = index == components.count - 1
+            if fileStat.st_mode & S_IFMT == S_IFLNK, !(allowingSymlinkAtEnd && isLastComponent) { return nil }
+        }
+        return url
+    }
+
+    /// Removes each symlink in `linkURLs` whose destination leads outside `directoryURL`.
+    /// - Returns: Whether all of them led inside.
+    func removeSymlinks(at linkURLs: [URL], leadingOutside directoryURL: URL) -> Bool {
+        var allContained = true
+        for linkURL in linkURLs {
+            if let destinationPath = try? self.destinationOfSymbolicLink(atPath: linkURL.path),
+               URL.isSymlinkDestination(destinationPath, ofLinkAt: linkURL, containedIn: directoryURL) { continue }
+            allContained = false
+            _ = try? self.removeItem(at: linkURL)
+        }
+        return allContained
+    }
 
     func itemExists(at url: URL) -> Bool {
         // Use `URL.checkResourceIsReachable()` instead of `FileManager.fileExists()` here
@@ -473,13 +529,12 @@ public extension URL {
 
     /// Returns whether the receiver is located inside `parentDirectoryURL` on the file system.
     ///
-    /// Both paths are resolved the way the file system resolves them when the receiver is opened or created:
-    /// symlinks in the parts of each path that already exist are followed, and `..` steps up from the
-    /// directory actually reached rather than from the path as written. Components that don't exist yet
-    /// are taken as written. A path that can't be resolved (e.g. due to a symlink loop) is not contained.
+    /// The file system resolves the part of the receiver's path that exists, following symlinks and applying `..`
+    /// to the directory actually reached. The rest doesn't exist yet, so the receiver only counts as contained if
+    /// that rest can't lead anywhere else once created: it must not start with a symlink or contain `..`.
+    /// A path that can't be resolved (e.g. due to a symlink loop) is not contained.
     func isContained(in parentDirectoryURL: URL) -> Bool {
-        guard let directory = try? ResolvedPath(resolving: parentDirectoryURL),
-              let path = try? ResolvedPath(resolving: self) else { return false }
-        return path.isContained(in: directory)
+        let startPath = self.path.hasPrefix("/") ? "/" : "."
+        return URL.isPath(self.path, resolvedFrom: startPath, containedIn: parentDirectoryURL)
     }
 }
