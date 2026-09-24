@@ -129,12 +129,12 @@ public struct Entry: Equatable {
                 return String(pathData: infoZIPExtraField.unicodeName, encoding: .utf8)
             }
         }
-        if self.centralDirectoryStructure.usesUTF8PathEncoding { return self.path(using: .utf8) }
         // Without the UTF-8 flag, the ZIP specification says names are CP437. Many archivers (e.g. `ditto` and
         // Info-ZIP's `zip` on macOS) write UTF-8 names without setting it, though, and CP437 names are hardly ever
         // valid UTF-8: that would take a box-drawing character followed by an accented letter.
-        if let utf8Path = String(data: self.centralDirectoryStructure.fileNameData, encoding: .utf8) { return utf8Path }
-        return self.path(using: .codepage437)
+        let isUTF8 = self.centralDirectoryStructure.usesUTF8PathEncoding
+            || String(data: self.centralDirectoryStructure.fileNameData, encoding: .utf8) != nil
+        return self.path(using: isUTF8 ? .utf8 : .codepage437)
     }
     /// The file attributes of the receiver as key/value pairs.
     ///
