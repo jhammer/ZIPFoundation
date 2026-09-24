@@ -70,7 +70,8 @@ struct ResolvedPath {
     struct Options: OptionSet {
         let rawValue: Int
 
-        /// Fail instead of following an existing symlink inside the directory resolution starts from.
+        /// Fail instead of following an existing symlink. The directory resolution starts from is already
+        /// resolved, so this only applies to symlinks in the path being appended.
         static let rejectingSymlinks = Options(rawValue: 1 << 0)
         /// Fail when `..` steps out of a component that doesn't exist yet. Where such a path ends up
         /// depends on what gets created there later.
@@ -113,11 +114,14 @@ struct ResolvedPath {
     }
 
     func isContained(in directory: ResolvedPath) -> Bool {
-        return self.components.starts(with: directory.components)
+        // Compare bytes: `==` treats canonically equivalent strings (e.g. "é" and "e\u{301}") as equal, but
+        // file systems like ext4 treat them as different names. Where they name the same item (e.g. APFS),
+        // this errs toward "not contained".
+        return self.components.starts(with: directory.components) { $0.utf8.elementsEqual($1.utf8) }
     }
 
     /// Returns whether `path`, resolved from the receiver, stays inside the receiver without passing
-    /// through a symlink located inside it.
+    /// through any symlink.
     func contains(relativePath path: String) -> Bool {
         guard let resolved = try? self.appending(path, options: .rejectingSymlinks) else { return false }
         return resolved.isContained(in: self)
@@ -139,9 +143,7 @@ struct ResolvedPath {
                 try result.removeLastComponent(options: options)
             default:
                 guard let destination = try result.appendComponent(component) else { continue }
-                if options.contains(.rejectingSymlinks), result.isContained(in: self) {
-                    throw ResolutionError.symlinkEncountered
-                }
+                if options.contains(.rejectingSymlinks) { throw ResolutionError.symlinkEncountered }
                 symlinkCount += 1
                 guard symlinkCount <= ResolvedPath.maxSymlinkCount else { throw ResolutionError.tooManySymlinks }
                 // Continue with the link's destination, starting from the directory containing the link.

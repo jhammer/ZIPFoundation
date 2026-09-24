@@ -352,6 +352,42 @@ extension ZIPFoundationTests {
         }
     }
 
+    func testSymlinkUnicodeNormalizationTraversalAttack() throws {
+        // "é" can be written as one code point or as "e" plus a combining accent. Swift's `==` treats both
+        // spellings as equal, but byte-exact file systems (e.g. ext4) treat them as different directories,
+        // so a link to the other spelling of the destination would point outside of it there.
+        let fileManager = FileManager()
+        let destinationURL = self.createDirectory(for: #function + "Caf\u{E9}")
+        // Foundation may normalize the name when creating the directory, so start from its actual spelling.
+        let name = destinationURL.lastPathComponent
+        let precomposedName = name.precomposedStringWithCanonicalMapping
+        let otherName = name.utf8.elementsEqual(precomposedName.utf8)
+            ? name.decomposedStringWithCanonicalMapping : precomposedName
+        XCTAssertEqual(otherName, name)
+        XCTAssertFalse(otherName.utf8.elementsEqual(name.utf8))
+        // Built as a string, since `URL` could normalize the name again.
+        let linkDestination = destinationURL.deletingLastPathComponent().path + "/" + otherName + "/file"
+        let archiveURL = try self.makeArchive(for: #function, entries: [("link", .symlink, linkDestination)])
+        XCTAssertSwiftError(try fileManager.unzipItem(at: archiveURL, to: destinationURL),
+                            throws: Archive.ArchiveError.uncontainedSymlink)
+        XCTAssertFalse(fileManager.itemExists(at: destinationURL.appendingPathComponent("link")))
+    }
+
+    func testEntryThroughSymlinkOutsideDestinationIsRejected() throws {
+        // `../alias/file.txt` ends up inside the destination, but only by passing through the symlink `alias`.
+        let fileManager = FileManager()
+        let destinationURL = self.createDirectory(for: #function)
+        let aliasName = destinationURL.lastPathComponent + "Alias"
+        let aliasURL = destinationURL.deletingLastPathComponent().appendingPathComponent(aliasName)
+        try fileManager.createSymbolicLink(at: aliasURL, withDestinationURL: destinationURL)
+        let archiveURL = try self.makeArchive(for: #function, entries: [
+            ("../" + aliasName + "/file.txt", .file, "content")
+        ])
+        XCTAssertCocoaError(try fileManager.unzipItem(at: archiveURL, to: destinationURL),
+                            throwsErrorWithCode: .fileReadInvalidFileName)
+        XCTAssertFalse(fileManager.itemExists(at: destinationURL.appendingPathComponent("file.txt")))
+    }
+
     func testEntryThroughContainedSymlinkIsRejected() throws {
         // Well-formed archives never place entries beneath a symlink, even one that stays inside the destination.
         let fileManager = FileManager()

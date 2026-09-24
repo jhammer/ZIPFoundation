@@ -174,7 +174,7 @@ extension FileManager {
         // Entry paths are resolved from the real destination directory against what's on disk when the
         // entry is written, so symlinks (including ones extracted earlier from this archive) can't redirect
         // them. Well-formed archives never place an entry beneath a symlink, so any entry whose path passes
-        // through a symlink inside the destination is rejected.
+        // through a symlink is rejected.
         let resolvedDestination = try? ResolvedPath(resolving: destinationURL)
 
         for entry in archive {
