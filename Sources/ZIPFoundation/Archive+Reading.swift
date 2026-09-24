@@ -114,7 +114,7 @@ extension Archive {
                 // The destination is resolved from the link's real parent directory, so that has to exist first.
                 try fileManager.createParentDirectoryStructure(for: url)
                 let validWithinURL = symlinksValidWithin ?? url.deletingLastPathComponent()
-                guard url.isSymlinkDestination(linkPath, containedIn: validWithinURL) else {
+                guard URL.isSymlinkDestination(linkPath, ofLinkAt: url, containedIn: validWithinURL) else {
                     throw ArchiveError.uncontainedSymlink
                 }
                 try fileManager.createSymbolicLink(atPath: url.path, withDestinationPath: linkPath)

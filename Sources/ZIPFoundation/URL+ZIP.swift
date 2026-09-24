@@ -31,22 +31,23 @@ extension URL {
         URL(fileURLWithPath: "/")
     }
 
-    /// Returns whether a symlink at the receiver pointing to `destination` resolves inside `directoryURL`.
+    /// Returns whether `destinationPath`, the destination of a symlink at `linkURL`, resolves inside `directoryURL`.
     ///
-    /// `destination` is resolved from the link's real parent directory, following any symlinks that
+    /// `destinationPath` is resolved from the link's real parent directory, following any symlinks that
     /// already exist on disk (including ones extracted earlier from the same archive).
     /// The parent directory is expected to exist.
-    func isSymlinkDestination(_ destination: String, containedIn directoryURL: URL) -> Bool {
+    static func isSymlinkDestination(_ destinationPath: String, ofLinkAt linkURL: URL,
+                                     containedIn directoryURL: URL) -> Bool {
         guard let directory = try? ResolvedPath(resolving: directoryURL) else { return false }
         // Everything is inside `/` (see `rootFS`), wherever the destination leads.
         guard !directory.components.isEmpty else { return true }
-        guard let parent = try? ResolvedPath(resolving: self.deletingLastPathComponent()) else { return false }
+        guard let parent = try? ResolvedPath(resolving: linkURL.deletingLastPathComponent()) else { return false }
         // The kernel resolves destinations starting with `/` from the root and all others (including `~/...`)
         // from the directory containing the link.
-        let start = destination.hasPrefix("/") ? ResolvedPath.root : parent
+        let start = destinationPath.hasPrefix("/") ? ResolvedPath.root : parent
         // `a -> b/../file` looks contained while `b` doesn't exist, but a later entry could create `b`
         // as a symlink to `.`, which would move the destination to `../file`.
-        guard let resolved = try? start.appending(destination, options: .rejectingParentOfMissingItems) else {
+        guard let resolved = try? start.appending(destinationPath, options: .rejectingParentOfMissingItems) else {
             return false
         }
         return resolved.isContained(in: directory)
