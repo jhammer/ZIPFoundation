@@ -90,6 +90,22 @@ class ZIPFoundationTests: XCTestCase {
         }
     }
 
+    /// Creates an archive containing `entries` in the given order. For symlinks, `contents` is the link destination.
+    func makeArchive(for testFunction: String,
+                     entries: [(path: String, type: Entry.EntryType, contents: String)]) throws -> URL {
+        var archiveURL = ZIPFoundationTests.tempZipDirectoryURL
+        archiveURL.appendPathComponent(self.archiveName(for: testFunction))
+        let archive = try Archive(url: archiveURL, accessMode: .create)
+        for entry in entries {
+            let data = Data(entry.contents.utf8)
+            try archive.addEntry(with: entry.path, type: entry.type, uncompressedSize: Int64(data.count),
+                                 provider: { position, size in
+                return data.subdata(in: Int(position)..<Int(position) + size)
+            })
+        }
+        return archiveURL
+    }
+
     func pathComponent(for testFunction: String) -> String {
         return testFunction.replacingOccurrences(of: "()", with: "")
     }
@@ -246,6 +262,13 @@ extension ZIPFoundationTests {
             ("testTemporaryReplacementDirectoryURL", testTemporaryReplacementDirectoryURL),
             ("testSimpleTraversalAttack", testSimpleTraversalAttack),
             ("testPathDelimiterTraversalAttack", testPathDelimiterTraversalAttack),
+            ("testSymlinkTraversalAttack", testSymlinkTraversalAttack),
+            ("testSymlinkChainTraversalAttack", testSymlinkChainTraversalAttack),
+            ("testSymlinkThroughMissingDirectoryTraversalAttack", testSymlinkThroughMissingDirectoryTraversalAttack),
+            ("testEntryThroughSymlinkTraversalAttack", testEntryThroughSymlinkTraversalAttack),
+            ("testEntryThroughContainedSymlinkIsRejected", testEntryThroughContainedSymlinkIsRejected),
+            ("testUnzipContainedSymlinks", testUnzipContainedSymlinks),
+            ("testIsContainedResolvesSymlinks", testIsContainedResolvesSymlinks),
             ("testUnzipItem", testUnzipItem),
             ("testUnzipItemWithPreferredEncoding", testUnzipItemWithPreferredEncoding),
             ("testUnzipItemErrorConditions", testUnzipItemErrorConditions),
@@ -337,7 +360,8 @@ extension ZIPFoundationTests {
             ("testArchiveExtractWithoutPreservesAppleMetadataSkipsCompanion",
              testArchiveExtractWithoutPreservesAppleMetadataSkipsCompanion),
             ("testArchiveExtractCompanionEntryItselfIsNotReinterpreted",
-             testArchiveExtractCompanionEntryItselfIsNotReinterpreted)
+             testArchiveExtractCompanionEntryItselfIsNotReinterpreted),
+            ("testUnzipItemDoesNotApplyCompanionThroughSymlink", testUnzipItemDoesNotApplyCompanionThroughSymlink)
         ]
         #else
         return []

@@ -171,6 +171,12 @@ extension FileManager {
         // entries. We buffer the parsed payloads and apply them after the main extraction pass.
         var pendingAppleDouble: [String: AppleDoublePayload] = [:]
 
+        // Entry paths are resolved from the real destination directory against what's on disk when the
+        // entry is written, so symlinks (including ones extracted earlier from this archive) can't redirect
+        // them. Well-formed archives never place an entry beneath a symlink, so any entry whose path passes
+        // through a symlink inside the destination is rejected.
+        let resolvedDestination = try? ResolvedPath(resolving: destinationURL)
+
         for entry in archive {
             let path = pathEncoding == nil ? entry.path : entry.path(using: pathEncoding!)
             if preservesAppleMetadata {
@@ -200,7 +206,7 @@ extension FileManager {
                 }
             }
             let entryURL = destinationURL.appendingPathComponent(path)
-            guard entryURL.isContained(in: destinationURL) else {
+            guard resolvedDestination?.contains(relativePath: path) == true else {
                 throw CocoaError(.fileReadInvalidFileName,
                                  userInfo: [NSFilePathErrorKey: entryURL.path])
             }
@@ -236,7 +242,9 @@ extension FileManager {
         if preservesAppleMetadata {
             for (path, payload) in pendingAppleDouble {
                 let targetURL = destinationURL.appendingPathComponent(path)
-                guard self.itemExists(at: targetURL) else { continue }
+                // Companion paths get the same containment check as regular entries.
+                guard resolvedDestination?.contains(relativePath: path) == true,
+                      self.itemExists(at: targetURL) else { continue }
                 FileManager.applyAppleDoublePayload(payload, to: targetURL)
             }
         }
@@ -463,24 +471,15 @@ extension CocoaError {
 
 public extension URL {
 
+    /// Returns whether the receiver is located inside `parentDirectoryURL` on the file system.
+    ///
+    /// Both paths are resolved the way the file system resolves them when the receiver is opened or created:
+    /// symlinks in the parts of each path that already exist are followed, and `..` steps up from the
+    /// directory actually reached rather than from the path as written. Components that don't exist yet
+    /// are taken as written. A path that can't be resolved (e.g. due to a symlink loop) is not contained.
     func isContained(in parentDirectoryURL: URL) -> Bool {
-        // Ensure this URL is contained in the passed in URL
-        let parentDirectoryURL = URL(fileURLWithPath: parentDirectoryURL.path, isDirectory: true).standardized
-        // Maliciously crafted ZIP files can contain entries using a prepended path delimiter `/` in combination
-        // with the parent directory shorthand `..` to bypass our containment check.
-        // When a malicious entry path like e.g. `/../secret.txt` gets appended to the destination 
-        // directory URL (e.g. `file:///tmp/`), the resulting URL `file:///tmp//../secret.txt` gets expanded
-        // to `file:///tmp/secret` when using `URL.standardized`. This URL would pass the check performed
-        // in `isContained(in:)`.
-        // Lower level API like POSIX `fopen` - which is used at a later point during extraction - expands
-        // `/tmp//../secret.txt` to `/secret.txt` though. This would lead to an escape to the parent directory.
-        // To avoid that, we replicate the behavior of `fopen`s path expansion and replace all double delimiters
-        // with single delimiters.
-        // More details: https://github.com/weichsel/ZIPFoundation/issues/281
-        let sanitizedEntryPathURL: URL = {
-            let sanitizedPath = self.path.replacingOccurrences(of: "//", with: "/")
-            return URL(fileURLWithPath: sanitizedPath)
-        }()
-        return sanitizedEntryPathURL.standardized.absoluteString.hasPrefix(parentDirectoryURL.absoluteString)
+        guard let directory = try? ResolvedPath(resolving: parentDirectoryURL),
+              let path = try? ResolvedPath(resolving: self) else { return false }
+        return path.isContained(in: directory)
     }
 }

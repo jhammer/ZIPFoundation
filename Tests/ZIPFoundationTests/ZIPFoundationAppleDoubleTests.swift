@@ -248,6 +248,28 @@ extension ZIPFoundationTests {
         XCTAssertNotNil(AppleDoublePayload.decode(rawData))
     }
 
+    func testUnzipItemDoesNotApplyCompanionThroughSymlink() throws {
+        // Companions are applied after all entries are extracted, so they must not follow symlinks
+        // extracted in the meantime either.
+        let fileManager = FileManager()
+        let destinationURL = self.createDirectory(for: #function)
+        let outsideURL = self.createDirectory(for: #function + "Outside")
+        let victimURL = outsideURL.appendingPathComponent("victim")
+        try Data("content".utf8).write(to: victimURL)
+
+        let archiveURL = try self.makeArchive(for: #function, entries: [("link", .symlink, outsideURL.path)])
+        let archive = try Archive(url: archiveURL, accessMode: .update)
+        let payload = AppleDoublePayload(extendedAttributes: [(name: "com.example.tag", data: Data("meta".utf8))])
+        let companion = payload.encode()
+        try archive.addEntry(with: "__MACOSX/link/._victim", type: .file,
+                             uncompressedSize: Int64(companion.count), provider: { position, size in
+            return companion.subdata(in: Int(position)..<Int(position) + size)
+        })
+
+        try fileManager.unzipItem(at: archiveURL, to: destinationURL, symlinksValidWithin: .rootFS)
+        XCTAssertNil(self.getXattr(name: "com.example.tag", at: victimURL))
+    }
+
     // MARK: - Helpers
 
     private func setXattr(name: String, value: Data, at url: URL) throws {

@@ -291,6 +291,127 @@ extension ZIPFoundationTests {
                             throwsErrorWithCode: .fileReadInvalidFileName)
     }
 
+    func testSymlinkTraversalAttack() throws {
+        // `link` points at the destination itself, so on disk `link/..` is the destination's parent,
+        // even though `destination/link/../outside` looks like `destination/outside` as a string.
+        let fileManager = FileManager()
+        let destinationURL = self.createDirectory(for: #function)
+        let archiveURL = try self.makeArchive(for: #function, entries: [
+            ("link", .symlink, "."),
+            ("escape", .symlink, "link/../outside")
+        ])
+        XCTAssertSwiftError(try fileManager.unzipItem(at: archiveURL, to: destinationURL),
+                            throws: Archive.ArchiveError.uncontainedSymlink)
+        XCTAssertFalse(fileManager.itemExists(at: destinationURL.appendingPathComponent("escape")))
+    }
+
+    func testSymlinkChainTraversalAttack() throws {
+        // `dir/up` resolves to the destination, so `dir/up/..` climbs out of it.
+        let fileManager = FileManager()
+        let destinationURL = self.createDirectory(for: #function)
+        let archiveURL = try self.makeArchive(for: #function, entries: [
+            ("dir/", .directory, ""),
+            ("dir/up", .symlink, ".."),
+            ("dir/escape", .symlink, "up/..")
+        ])
+        XCTAssertSwiftError(try fileManager.unzipItem(at: archiveURL, to: destinationURL),
+                            throws: Archive.ArchiveError.uncontainedSymlink)
+        XCTAssertFalse(fileManager.itemExists(at: destinationURL.appendingPathComponent("dir/escape")))
+    }
+
+    func testSymlinkThroughMissingDirectoryTraversalAttack() throws {
+        // While `missing` doesn't exist, `missing/../outside` stays inside the destination. The next entry
+        // turns `missing` into a link to `.`, which would move `link` to the destination's parent.
+        let fileManager = FileManager()
+        let destinationURL = self.createDirectory(for: #function)
+        let archiveURL = try self.makeArchive(for: #function, entries: [
+            ("link", .symlink, "missing/../outside"),
+            ("missing", .symlink, ".")
+        ])
+        XCTAssertSwiftError(try fileManager.unzipItem(at: archiveURL, to: destinationURL),
+                            throws: Archive.ArchiveError.uncontainedSymlink)
+        XCTAssertFalse(fileManager.itemExists(at: destinationURL.appendingPathComponent("link")))
+    }
+
+    func testEntryThroughSymlinkTraversalAttack() throws {
+        // Symlinks may point anywhere with `.rootFS`, but entries must still not be written through them.
+        let fileManager = FileManager()
+        let outsideURL = self.createDirectory(for: #function + "Outside")
+        let entryTypes: [Entry.EntryType] = [.file, .directory, .symlink]
+        for type in entryTypes {
+            let name = #function + "\(type)"
+            let destinationURL = self.createDirectory(for: name)
+            let archiveURL = try self.makeArchive(for: name, entries: [
+                ("link", .symlink, outsideURL.path),
+                (type == .directory ? "link/item/" : "link/item", type, "item")
+            ])
+            XCTAssertCocoaError(try fileManager.unzipItem(at: archiveURL, to: destinationURL,
+                                                          symlinksValidWithin: .rootFS),
+                                throwsErrorWithCode: .fileReadInvalidFileName)
+            XCTAssertFalse(fileManager.itemExists(at: outsideURL.appendingPathComponent("item")))
+        }
+    }
+
+    func testEntryThroughContainedSymlinkIsRejected() throws {
+        // Well-formed archives never place entries beneath a symlink, even one that stays inside the destination.
+        let fileManager = FileManager()
+        let destinationURL = self.createDirectory(for: #function)
+        let archiveURL = try self.makeArchive(for: #function, entries: [
+            ("dir/", .directory, ""),
+            ("link", .symlink, "dir"),
+            ("link/file.txt", .file, "content")
+        ])
+        XCTAssertCocoaError(try fileManager.unzipItem(at: archiveURL, to: destinationURL),
+                            throwsErrorWithCode: .fileReadInvalidFileName)
+        XCTAssertFalse(fileManager.itemExists(at: destinationURL.appendingPathComponent("dir/file.txt")))
+    }
+
+    func testUnzipContainedSymlinks() throws {
+        let fileManager = FileManager()
+        let realDestinationURL = self.createDirectory(for: #function)
+        // Symlinks leading to the destination itself are resolved before checking containment.
+        var destinationURL = ZIPFoundationTests.tempZipDirectoryURL
+        destinationURL.appendPathComponent(self.pathComponent(for: #function) + "Link")
+        try fileManager.createSymbolicLink(at: destinationURL, withDestinationURL: realDestinationURL)
+        let archiveURL = try self.makeArchive(for: #function, entries: [
+            // Parent directories that don't exist yet are created before the destination is resolved.
+            ("dir/nested/up", .symlink, "../file.txt"),
+            ("dir/file.txt", .file, "content"),
+            ("dir/link", .symlink, "file.txt"),
+            // Link destinations may pass through symlinks extracted earlier.
+            ("chained", .symlink, "dir/link"),
+            ("absolute", .symlink, realDestinationURL.appendingPathComponent("dir/file.txt").path),
+            ("dir/sub/", .directory, ""),
+            ("dir/sub/../sibling.txt", .file, "sibling")
+        ])
+        try fileManager.unzipItem(at: archiveURL, to: destinationURL)
+        for path in ["dir/nested/up", "dir/link", "chained", "absolute"] {
+            let linkURL = realDestinationURL.appendingPathComponent(path)
+            XCTAssertEqual(try String(contentsOf: linkURL, encoding: .utf8), "content")
+        }
+        let siblingURL = realDestinationURL.appendingPathComponent("dir/sibling.txt")
+        XCTAssertEqual(try String(contentsOf: siblingURL, encoding: .utf8), "sibling")
+    }
+
+    func testIsContainedResolvesSymlinks() throws {
+        let fileManager = FileManager()
+        let directoryURL = self.createDirectory(for: #function)
+        try fileManager.createSymbolicLink(atPath: directoryURL.appendingPathComponent("link").path,
+                                           withDestinationPath: ".")
+        let directoryLinkURL = directoryURL.deletingLastPathComponent()
+            .appendingPathComponent(directoryURL.lastPathComponent + "Link")
+        try fileManager.createSymbolicLink(at: directoryLinkURL, withDestinationURL: directoryURL)
+        let siblingURL = directoryURL.deletingLastPathComponent()
+            .appendingPathComponent(directoryURL.lastPathComponent + "Sibling/file")
+
+        XCTAssert(directoryURL.appendingPathComponent("missing/../file").isContained(in: directoryURL))
+        XCTAssert(directoryLinkURL.appendingPathComponent("file").isContained(in: directoryURL))
+        XCTAssert(directoryURL.appendingPathComponent("file").isContained(in: directoryLinkURL))
+        XCTAssertFalse(directoryURL.appendingPathComponent("link/../file").isContained(in: directoryURL))
+        XCTAssertFalse(directoryURL.appendingPathComponent("//../file").isContained(in: directoryURL))
+        XCTAssertFalse(siblingURL.isContained(in: directoryURL))
+    }
+
     func testInvalidSymlinkCompressionMethodErrorConditions() {
         let archive = self.archive(for: #function, mode: .read)
         guard let entry = archive["symlink"] else {
