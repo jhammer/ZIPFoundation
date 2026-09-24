@@ -102,9 +102,14 @@ struct ResolvedPath {
 
     /// Resolves the path of the file URL `url`. A relative path is resolved from the current directory.
     init(resolving url: URL) throws {
-        let path = url.path
-        let absolutePath = path.hasPrefix("/") ? path : FileManager().currentDirectoryPath + "/" + path
-        self = try ResolvedPath.root.appending(absolutePath)
+        var path = url.path
+        if !path.hasPrefix("/") {
+            // Relative paths are resolved against the current directory, the same one the kernel will use for writes.
+            let currentDirectoryPath = FileManager().currentDirectoryPath
+            guard currentDirectoryPath.hasPrefix("/") else { throw ResolutionError.invalidPath }
+            path = currentDirectoryPath + "/" + path
+        }
+        self = try ResolvedPath.root.appending(path)
     }
 
     func isContained(in directory: ResolvedPath) -> Bool {
