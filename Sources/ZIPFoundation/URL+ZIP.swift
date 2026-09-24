@@ -11,7 +11,6 @@
 import Foundation
 
 extension URL {
-
     static func temporaryReplacementDirectoryURL(for archive: Archive) -> URL {
         #if swift(>=5.0) || os(macOS) || os(iOS) || os(tvOS) || os(visionOS) || os(watchOS)
         if archive.url.isFileURL,
@@ -36,8 +35,11 @@ extension URL {
     /// `destinationPath` is resolved from the link's real parent directory, following any symlinks that
     /// already exist on disk (including ones extracted earlier from the same archive).
     /// The parent directory is expected to exist.
-    static func isSymlinkDestination(_ destinationPath: String, ofLinkAt linkURL: URL,
-                                     containedIn directoryURL: URL) -> Bool {
+    static func isSymlinkDestination(
+        _ destinationPath: String,
+        ofLinkAt linkURL: URL,
+        containedIn directoryURL: URL
+    ) -> Bool {
         guard let directory = try? ResolvedPath(resolving: directoryURL) else { return false }
         // Everything is inside `/` (see `rootFS`), wherever the destination leads.
         guard !directory.components.isEmpty else { return true }
@@ -65,7 +67,6 @@ extension URL {
 /// `URL.standardized` and `URL.resolvingSymlinksInPath()` collapse `..` lexically instead, so containment
 /// checks based on them can be sidestepped by paths like `link/../file` once `link` is a symlink on disk.
 struct ResolvedPath {
-
     struct Options: OptionSet {
         let rawValue: Int
 
