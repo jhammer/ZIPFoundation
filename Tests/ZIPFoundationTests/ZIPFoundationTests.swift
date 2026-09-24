@@ -229,6 +229,7 @@ extension ZIPFoundationTests {
             ("testEntryMissingDataDescriptorErrorCondition", testEntryMissingDataDescriptorErrorCondition),
             ("testEntryTypeDetectionHeuristics", testEntryTypeDetectionHeuristics),
             ("testEntryValidDataDescriptor", testEntryValidDataDescriptor),
+            ("testEntryPathWithoutUTF8Flag", testEntryPathWithoutUTF8Flag),
             ("testEntryWrongDataLengthErrorConditions", testEntryWrongDataLengthErrorConditions),
             ("testExtractCompressedDataDescriptorArchive", testExtractCompressedDataDescriptorArchive),
             ("testExtractCompressedFolderEntries", testExtractCompressedFolderEntries),

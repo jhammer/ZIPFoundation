@@ -13,6 +13,31 @@ import XCTest
 
 extension ZIPFoundationTests {
 
+    func testEntryPathWithoutUTF8Flag() {
+        func path(ofName nameBytes: [UInt8], generalPurposeBitFlag: UInt16) -> String? {
+            let fileNameData = Data(nameBytes)
+            let localFileHeader = Entry.LocalFileHeader(versionNeededToExtract: 20,
+                                                        generalPurposeBitFlag: generalPurposeBitFlag,
+                                                        compressionMethod: 0, lastModFileTime: 0, lastModFileDate: 0,
+                                                        crc32: 0, compressedSize: 0, uncompressedSize: 0,
+                                                        fileNameLength: UInt16(fileNameData.count),
+                                                        extraFieldLength: 0, fileNameData: fileNameData,
+                                                        extraFieldData: Data())
+            let centralDirectoryStructure = Entry.CentralDirectoryStructure(localFileHeader: localFileHeader,
+                                                                            fileAttributes: 0, relativeOffset: 0,
+                                                                            extraField: (0, Data()))
+            return Entry(centralDirectoryStructure: centralDirectoryStructure, localFileHeader: localFileHeader)?.path
+        }
+        let utf8Flag = UInt16(1 << 11)
+        let name = "Tino\u{2019}s.dmtemplate"
+        XCTAssertEqual(path(ofName: Array(name.utf8), generalPurposeBitFlag: utf8Flag), name)
+        // `ditto` and Info-ZIP's `zip` write UTF-8 names without setting the flag.
+        XCTAssertEqual(path(ofName: Array(name.utf8), generalPurposeBitFlag: 0), name)
+        // "Größe" in CP437 isn't valid UTF-8.
+        XCTAssertEqual(path(ofName: [0x47, 0x72, 0x94, 0xE1, 0x65], generalPurposeBitFlag: 0), "Gr\u{F6}\u{DF}e")
+        XCTAssertEqual(path(ofName: Array("plain.txt".utf8), generalPurposeBitFlag: 0), "plain.txt")
+    }
+
     func testEntryWrongDataLengthErrorConditions() {
         let emptyCDS = Entry.CentralDirectoryStructure(data: Data(),
                                                        additionalDataProvider: {_ -> Data in
