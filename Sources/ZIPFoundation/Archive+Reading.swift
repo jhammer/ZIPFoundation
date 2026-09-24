@@ -37,6 +37,11 @@ extension Archive {
 
     /// Read a ZIP `Entry` from the receiver and write it to `url`.
     ///
+    /// A symlink's destination is checked against `symlinksValidWithin` when the link is created, based on what
+    /// exists on disk at that moment. Entries extracted later can change where it leads (e.g. by creating a
+    /// directory it passes through as another symlink), so use `FileManager.unzipItem(at:to:)` to extract a
+    /// whole archive: it checks every symlink once all entries are extracted.
+    ///
     /// - Parameters:
     ///   - entry: The ZIP `Entry` to read.
     ///   - url: The destination file URL.
@@ -71,10 +76,12 @@ extension Archive {
     }
 
     /// Internal extract that accepts a shared `ByteBudget`. Used by `unzipItem` to enforce a single
-    /// archive-wide byte cap across all entries.
+    /// archive-wide byte cap across all entries. `unzipItem` also passes `checksSymlinkDestination: false`,
+    /// since it checks every symlink once all entries are extracted.
     func extract(_ entry: Entry, to url: URL, bufferSize: Int = defaultReadChunkSize,
                  skipCRC32: Bool = false,
                  symlinksValidWithin: URL? = nil,
+                 checksSymlinkDestination: Bool = true,
                  budget: ByteBudget?,
                  progress: Progress? = nil,
                  preservesAppleMetadata: Bool = true) throws -> CRC32 {
@@ -111,11 +118,13 @@ extension Archive {
             let rawConsumer: Consumer = { (data: Data) in
                 guard let linkPath = String(data: data, encoding: .utf8) else { throw ArchiveError.invalidEntryPath }
 
-                // The destination is followed from the link's parent directory, so that has to exist first.
                 try fileManager.createParentDirectoryStructure(for: url)
-                let validWithinURL = symlinksValidWithin ?? url.deletingLastPathComponent()
-                guard URL.isSymlinkDestination(linkPath, ofLinkAt: url, containedIn: validWithinURL) else {
-                    throw ArchiveError.uncontainedSymlink
+                if checksSymlinkDestination {
+                    // The destination is followed from the link's parent directory, which now exists.
+                    let validWithinURL = symlinksValidWithin ?? url.deletingLastPathComponent()
+                    guard URL.isSymlinkDestination(linkPath, ofLinkAt: url, containedIn: validWithinURL) else {
+                        throw ArchiveError.uncontainedSymlink
+                    }
                 }
                 try fileManager.createSymbolicLink(atPath: url.path, withDestinationPath: linkPath)
             }

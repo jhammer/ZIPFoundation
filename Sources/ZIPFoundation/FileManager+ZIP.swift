@@ -214,20 +214,20 @@ extension FileManager {
             }
             let crc32: CRC32
             // unzipItem batches companion handling (see below), so we opt each per-entry extract
-            // out of the per-call archive lookup. Symlink destinations are checked after the loop.
+            // out of the per-call archive lookup. Symlink destinations are checked after the loop too.
             if let progress = progress {
                 let entryProgress = archive.makeProgressForReading(entry)
                 progress.addChild(entryProgress, withPendingUnitCount: entryProgress.totalUnitCount)
                 crc32 = try archive.extract(entry, to: entryURL,
                                             skipCRC32: skipCRC32,
-                                            symlinksValidWithin: .rootFS,
+                                            checksSymlinkDestination: false,
                                             budget: budget,
                                             progress: entryProgress,
                                             preservesAppleMetadata: false)
             } else {
                 crc32 = try archive.extract(entry, to: entryURL,
                                             skipCRC32: skipCRC32,
-                                            symlinksValidWithin: .rootFS,
+                                            checksSymlinkDestination: false,
                                             budget: budget,
                                             preservesAppleMetadata: false)
             }
