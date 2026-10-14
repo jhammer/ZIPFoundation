@@ -171,6 +171,58 @@ extension ZIPFoundationTests {
         XCTAssert(fileManager.itemExists(at: destinationURL.appendingPathComponent("link")))
     }
 
+    func testUnzipRemovesUncontainedSymlinks() throws {
+        let fileManager = FileManager()
+        var archiveURL = ZIPFoundationTests.tempZipDirectoryURL
+        archiveURL.appendPathComponent(self.archiveName(for: #function))
+        let archive = try XCTUnwrap(try? Archive(url: archiveURL, accessMode: .create))
+        let fileData = Data("contained".utf8)
+        try archive.addEntry(with: "file.txt", type: .file, uncompressedSize: Int64(fileData.count),
+                             provider: { position, size -> Data in
+            return fileData.subdata(in: Int(position)..<Int(position) + size)
+        })
+        let goodTarget = "file.txt"
+        try archive.addEntry(with: "good_link", type: .symlink, uncompressedSize: Int64(goodTarget.utf8.count),
+                             provider: { _, _ -> Data in Data(goodTarget.utf8) })
+        let evilTarget = ZIPFoundationTests.tempZipDirectoryURL.path
+        try archive.addEntry(with: "evil_link", type: .symlink, uncompressedSize: Int64(evilTarget.utf8.count),
+                             provider: { _, _ -> Data in Data(evilTarget.utf8) })
+        try archive.addEntry(with: "after.txt", type: .file, uncompressedSize: Int64(fileData.count),
+                             provider: { position, size -> Data in
+            return fileData.subdata(in: Int(position)..<Int(position) + size)
+        })
+
+        // The default policy rejects the archive but still leaves the contained entries on disk.
+        let rejectURL = self.createDirectory(for: #function).appendingPathComponent("reject", isDirectory: true)
+        XCTAssertSwiftError(try fileManager.unzipItem(at: archiveURL, to: rejectURL),
+                            throws: Archive.ArchiveError.uncontainedSymlink)
+        XCTAssertFalse(fileManager.itemExists(at: rejectURL.appendingPathComponent("evil_link")))
+        XCTAssert(fileManager.itemExists(at: rejectURL.appendingPathComponent("good_link")))
+
+        // `.remove` drops the uncontained link and succeeds.
+        let removeURL = self.createDirectory(for: #function).appendingPathComponent("remove", isDirectory: true)
+        XCTAssertNoThrow(try fileManager.unzipItem(at: archiveURL, to: removeURL, uncontainedSymlinks: .remove))
+        XCTAssertFalse(fileManager.itemExists(at: removeURL.appendingPathComponent("evil_link")))
+        XCTAssert(fileManager.itemExists(at: removeURL.appendingPathComponent("good_link")))
+        let goodLinkPath = removeURL.appendingPathComponent("good_link").path
+        XCTAssertEqual(try fileManager.destinationOfSymbolicLink(atPath: goodLinkPath), goodTarget)
+        XCTAssertEqual(try Data(contentsOf: removeURL.appendingPathComponent("file.txt")), fileData)
+        XCTAssertEqual(try Data(contentsOf: removeURL.appendingPathComponent("after.txt")), fileData)
+
+        // Widening the valid directory keeps the link that was previously removed.
+        let keepURL = self.createDirectory(for: #function).appendingPathComponent("keep", isDirectory: true)
+        XCTAssertNoThrow(try fileManager.unzipItem(at: archiveURL, to: keepURL, symlinksValidWithin: URL.rootFS,
+                                                   uncontainedSymlinks: .remove))
+        XCTAssert(fileManager.itemExists(at: keepURL.appendingPathComponent("evil_link")))
+
+        // The bundled archive with an absolute `/etc/hosts` link extracts to an empty directory.
+        let resourceArchive = self.archive(for: "testUnzipUncontainedSymlink", mode: .read)
+        let resourceURL = self.createDirectory(for: #function).appendingPathComponent("resource", isDirectory: true)
+        XCTAssertNoThrow(try fileManager.unzipItem(at: resourceArchive.url, to: resourceURL,
+                                                   uncontainedSymlinks: .remove))
+        XCTAssertFalse(fileManager.itemExists(at: resourceURL.appendingPathComponent("evil_symlink")))
+    }
+
     // On Darwin platforms, we want the same behavior as the system-provided ZIP utilities.
     // On the Mac, this includes the graphical Archive Utility as well as the `ditto`
     // command line tool.

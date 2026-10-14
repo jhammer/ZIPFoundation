@@ -14,6 +14,18 @@ extension FileManager {
 
     typealias CentralDirectoryStructure = Entry.CentralDirectoryStructure
 
+    /// How `unzipItem` treats symlinks whose destination resolves outside `symlinksValidWithin`.
+    ///
+    /// Uncontained symlinks are never left on disk. The policy only decides whether their presence is reported
+    /// as an error once the archive has been extracted.
+    public enum UncontainedSymlinkPolicy {
+        /// Remove uncontained symlinks and throw `ArchiveError.uncontainedSymlink` once all entries are extracted.
+        /// Everything else in the archive stays on disk.
+        case reject
+        /// Remove uncontained symlinks and extract the rest of the archive as if they weren't part of it.
+        case remove
+    }
+
     /// Zips the file or directory contents at the specified source URL to the destination URL.
     ///
     /// If the item at the source URL is a directory, the directory itself will be
@@ -98,6 +110,10 @@ extension FileManager {
     ///   - skipCRC32: Optional flag to skip calculation of the CRC32 checksum to improve performance.
     ///   - symlinksValidWithin: Any symlink target that resolves outside this URL is rejected for security reasons.
     ///                          Pass `.rootFS` to allow symlinks to point anywhere on the filesystem.
+    ///   - uncontainedSymlinks: What to do with symlinks that resolve outside `symlinksValidWithin`. They are
+    ///                          always removed from the destination; `.reject` additionally throws
+    ///                          `ArchiveError.uncontainedSymlink` after extraction, while `.remove` silently
+    ///                          extracts the rest of the archive. Default is `.reject`.
     ///   - maxExtractedBytes: Optional cap on the cumulative number of decompressed bytes produced across
     ///                        all entries (and AppleDouble companions). `ArchiveError.extractedByteLimitExceeded`
     ///                        is thrown if the limit is crossed. Use this to defend against zip bombs when
@@ -113,6 +129,7 @@ extension FileManager {
     /// - Throws: Throws an error if the source item does not exist or the destination URL is not writable.
     public func unzipItem(at sourceURL: URL, to destinationURL: URL,
                           skipCRC32: Bool = false, symlinksValidWithin: URL? = nil,
+                          uncontainedSymlinks: UncontainedSymlinkPolicy = .reject,
                           maxExtractedBytes: Int64? = nil,
                           progress: Progress? = nil, pathEncoding: String.Encoding? = nil,
                           preservesAppleMetadata: Bool = true) throws {
@@ -122,6 +139,7 @@ extension FileManager {
         let archive = try Archive(url: sourceURL, accessMode: .read, pathEncoding: pathEncoding)
         try self.unzipItem(archive, to: destinationURL,
                            skipCRC32: skipCRC32, symlinksValidWithin: symlinksValidWithin,
+                           uncontainedSymlinks: uncontainedSymlinks,
                            maxExtractedBytes: maxExtractedBytes,
                            progress: progress, pathEncoding: pathEncoding,
                            preservesAppleMetadata: preservesAppleMetadata)
@@ -139,6 +157,10 @@ extension FileManager {
     ///   - skipCRC32: Optional flag to skip calculation of the CRC32 checksum to improve performance.
     ///   - symlinksValidWithin: Any symlink target that resolves outside this URL is rejected for security reasons.
     ///                          Pass `.rootFS` to allow symlinks to point anywhere on the filesystem.
+    ///   - uncontainedSymlinks: What to do with symlinks that resolve outside `symlinksValidWithin`. They are
+    ///                          always removed from the destination; `.reject` additionally throws
+    ///                          `ArchiveError.uncontainedSymlink` after extraction, while `.remove` silently
+    ///                          extracts the rest of the archive. Default is `.reject`.
     ///   - maxExtractedBytes: Optional cap on the cumulative number of decompressed bytes produced across
     ///                        all entries (and AppleDouble companions). `ArchiveError.extractedByteLimitExceeded`
     ///                        is thrown if the limit is crossed. Use this to defend against zip bombs when
@@ -154,6 +176,7 @@ extension FileManager {
     /// - Throws: Throws an error if the destination URL is not writable.
     public func unzipItem(_ archive: Archive, to destinationURL: URL,
                           skipCRC32: Bool = false, symlinksValidWithin: URL? = nil,
+                          uncontainedSymlinks: UncontainedSymlinkPolicy = .reject,
                           maxExtractedBytes: Int64? = nil,
                           progress: Progress? = nil, pathEncoding: String.Encoding? = nil,
                           preservesAppleMetadata: Bool = true) throws {
@@ -242,7 +265,8 @@ extension FileManager {
         }
 
         hasCheckedSymlinks = true
-        guard self.removeSymlinks(at: symlinkURLs, leadingOutside: symlinksValidWithin) else {
+        let allSymlinksContained = self.removeSymlinks(at: symlinkURLs, leadingOutside: symlinksValidWithin)
+        if !allSymlinksContained, uncontainedSymlinks == .reject {
             throw Archive.ArchiveError.uncontainedSymlink
         }
 
